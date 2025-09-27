@@ -1,0 +1,8 @@
+{
+  "client1": {
+    "cid": "client1",
+    "shared_key": "5d78c02c113d0faad30f1206e5c09c28",
+    "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwv/SZeKB2i5fvjEZJEGx\nh1Gyjwf+GR2vonUX6QY6l9robpQsKxYaNHLYdSU8nU/rz9/OBxHimWdbZTxM9yje\nCf6xZ4k+Jxk3VnCRznqmz+yitRJ7LBVswCdKFJt+xJI/etwcbCEt0mpVS4P5J3Kc\nlOp7PPcYpth1K7sNCTygMR8BHXbcKfs5l+JVQV5/hSm8AFSgPJmz8DYxRh+24mfV\nsOlHR4Qd+Uvjd2RqCb1zq9DJBKoRyEz7TykyrLltakdU+Up+OPwl3yAdhkmPgfnW\nlRsU56xzA5XEzftraUuj9Xiw23fVMZpJ/CP5Nd4Klh7WD+D+Wi38a59aCXGpyysR\n4wIDAQAB\n-----END PUBLIC KEY-----\n",
+    "mac": "04:7c:16:a6:fa:d2"
+  }
+}

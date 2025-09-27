@@ -11,6 +11,9 @@ from typing import Optional
 router = APIRouter()
 DB_FILE = Path("clients.json")
 
+# Toggle between RSA-only and RSA+PUF
+USE_PUF = False  # <<< Set to True for RSA+PUF, False for RSA-only
+
 # ---------------- Server key management ----------------
 SERVER_KEYS = []
 def create_new_server_key():
@@ -47,7 +50,7 @@ if DB_FILE.exists():
             "shared_key": shared_key,
             "public_key": pub_obj,
             "public_key_pem": pub_pem,
-            "mac": data.get("mac"),   
+            "mac": data.get("mac"),
             "Gn": None,
             "authenticated": False,
             "session_token": None,
@@ -65,7 +68,7 @@ def save_clients():
             "cid": data["cid"].decode(),
             "shared_key": data["shared_key"].hex(),
             "public_key_pem": data.get("public_key_pem") or None,
-            "mac": data.get("mac") 
+            "mac": data.get("mac")
         }
     with open(DB_FILE, "w") as f:
         json.dump(serializable, f, indent=2)
@@ -82,12 +85,12 @@ def cleanup_used_gns(): now = int(time.time()); [USED_GNS.pop(k) for k,v in list
 # ---------------- Schemas ----------------
 class ClientRequest(BaseModel):
     client_id: str
-    mac: Optional[str] = None  
+    mac: Optional[str] = None
 
 class PublicKeyRegister(BaseModel):
     client_id: str
     public_key_pem: str
-    mac: Optional[str] = None   
+    mac: Optional[str] = None
 
 class VerifyPayload(BaseModel):
     client_id: str
@@ -119,7 +122,7 @@ def create_new_client(req: NewClientRequest):
         "shared_key": shared_key,
         "public_key": None,
         "public_key_pem": None,
-        "mac": None, 
+        "mac": None,
         "Gn": None,
         "authenticated": False,
         "session_token": None,
@@ -140,7 +143,7 @@ def register_client_key(req: PublicKeyRegister):
         pub_key = serialization.load_pem_public_key(req.public_key_pem.encode())
         client["public_key"] = pub_key
         client["public_key_pem"] = req.public_key_pem
-        if req.mac: client["mac"] = req.mac.lower()  
+        if req.mac: client["mac"] = req.mac.lower()
         save_clients()
         return {"status": "Public key registered successfully", "mac": client["mac"]}
     except Exception as e:
@@ -175,72 +178,89 @@ def client_verification(req: ClientRequest):
     ))
     return {"data": base64.b64encode(enc).decode(), "server_kid": SERVER_KEYS[0]["kid"]}
 
-
 @router.post("/mutual")
 def mutual_auth(req: ClientRequest):
     client = CLIENT_DB.get(req.client_id)
     if not client or not client.get("public_key"):
         return {"error": "Unknown client or missing public key"}
-    if not client.get("mac"):
-        return {"error": "MAC not registered for this client"}
 
-    if req.mac and req.mac.lower() != client["mac"].lower():
-        return {"error": f"MAC address mismatch {req.mac.lower()} and {client["mac"].lower()}"}
+    cid = client["cid"]
 
-    cid, mac = client["cid"], client["mac"]
+    if USE_PUF:
+        if not client.get("mac"):
+            return {"error": "MAC not registered for this client"}
+        if req.mac and req.mac.lower() != client["mac"].lower():
+            return {"error": f"MAC address mismatch"}
 
-    Gn = generate_nonce(16)
-    while is_gn_used(Gn): Gn = generate_nonce(16)
-    client["Gn"] = Gn
-    add_used_gn(Gn)
+        mac = client["mac"]
+        Gn = generate_nonce(16)
+        while is_gn_used(Gn): Gn = generate_nonce(16)
+        client["Gn"] = Gn
+        add_used_gn(Gn)
+        Kn, Kn1 = F(Gn), F(F(Gn))
+        Gn1 = simulate_puf(Gn, mac)
+        Gn2 = simulate_puf(Gn1, mac)
+        A = xor_bytes(xor_bytes(Gn1, Kn), cid)
+        B = xor_bytes(xor_bytes(Gn2, Kn1), cid)
+    else:
+        A = b"A_plain_RSA"
+        B = b"B_plain_RSA"
 
-    Kn, Kn1 = F(Gn), F(F(Gn))
-    Gn1 = simulate_puf(Gn, mac)
-    Gn2 = simulate_puf(Gn1, mac)
-
-    A = xor_bytes(xor_bytes(Gn1, Kn), cid)
-    B = xor_bytes(xor_bytes(Gn2, Kn1), cid)
     t4 = int(time.time()).to_bytes(8, 'big')
-
-    enc1 = client["public_key"].encrypt(A+t4, padding.OAEP(
+    enc1 = client["public_key"].encrypt(A + t4, padding.OAEP(
         mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
-    enc2 = client["public_key"].encrypt(B+t4, padding.OAEP(
+    enc2 = client["public_key"].encrypt(B + t4, padding.OAEP(
         mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
 
+    client["Gn"] = b"placeholder_nonce" if not USE_PUF else client["Gn"]
     return {"M4": base64.b64encode(enc1).decode(), "M5": base64.b64encode(enc2).decode()}
 
 @router.post("/verify")
 def verify_messages(req: VerifyPayload):
     client = CLIENT_DB.get(req.client_id)
-    if not client or not client.get("Gn") or not client.get("public_key"):
-        return {"error": "Client not found or Gn not set"}
+    if not client or not client.get("public_key"):
+        return {"error": "Client not found or missing key"}
 
-    if req.mac and req.mac.lower() != client["mac"].lower():
-        return {"error": "MAC address mismatch"}
-
-    cid, Gn, mac = client["cid"], client["Gn"], client["mac"]
-    
-    Kn, Kn1 = F(Gn), F(F(Gn))
-    Gn1 = simulate_puf(Gn, mac) 
-    Gn2 = simulate_puf(Gn1, mac)
-    A_expected, B_expected = xor_bytes(xor_bytes(Gn1, Kn), cid), xor_bytes(xor_bytes(Gn2, Kn1), cid)
+    cid = client["cid"]
 
     try:
         m4_bytes, m5_bytes, sig_bytes = base64.b64decode(req.M4), base64.b64decode(req.M5), base64.b64decode(req.signature)
-        if len(m4_bytes)<8 or len(m5_bytes)<8: return {"error": "Malformed M4/M5"}
+        if len(m4_bytes) < 8 or len(m5_bytes) < 8:
+            return {"error": "Malformed M4/M5"}
         A_received, B_received = m4_bytes[:-8], m5_bytes[:-8]
-        if not (A_received == A_expected and B_received == B_expected): return {"status": "Authentication FAILED - mismatch"}
 
-        client["public_key"].verify(sig_bytes, A_received+B_received, padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH), hashes.SHA256())
+        if USE_PUF:
+            Gn, mac = client["Gn"], client["mac"]
+            Kn, Kn1 = F(Gn), F(F(Gn))
+            Gn1 = simulate_puf(Gn, mac)
+            Gn2 = simulate_puf(Gn1, mac)
+            A_expected = xor_bytes(xor_bytes(Gn1, Kn), cid)
+            B_expected = xor_bytes(xor_bytes(Gn2, Kn1), cid)
+            if not (A_received == A_expected and B_received == B_expected):
+                return {"status": "Authentication FAILED - mismatch"}
 
-        client["Gn"], client["authenticated"] = Gn1, True
-        SK = hashlib.sha256(Gn+Kn+cid).digest()
-        token, expiry = base64.urlsafe_b64encode(SK).decode(), int(time.time())+300
+        client["public_key"].verify(sig_bytes, A_received + B_received, padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH), hashes.SHA256())
+
+        client["authenticated"] = True
+        SK = hashlib.sha256(cid + A_received + B_received).digest()
+        token = base64.urlsafe_b64encode(SK).decode()
+        expiry = int(time.time()) + 300
         session_id = str(uuid.uuid4())
-        client.update({"session_token": token,"session_expiry": expiry,"session_id": session_id})
+        client.update({
+            "session_token": token,
+            "session_expiry": expiry,
+            "session_id": session_id
+        })
         client["used_session_ids"].append(session_id)
 
-        return {"status": "Mutual authentication SUCCESS","session_token": token,"session_id": session_id,"expires_at": expiry}
+        return {
+            "status": "Mutual authentication SUCCESS",
+            "session_token": token,
+            "session_id": session_id,
+            "expires_at": expiry
+        }
+
     except InvalidSignature:
         return {"error": "Invalid client signature"}
     except Exception as e:

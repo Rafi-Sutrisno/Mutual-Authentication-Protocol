@@ -4,7 +4,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 
 BASE = "http://127.0.0.1:8000"
-client_id = "fails_client"
+client_id = "client1"
 
 def get_mac_address():
     """Get this machine's primary MAC address in aa:bb:cc:dd:ee:ff format."""
